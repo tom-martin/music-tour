@@ -60,7 +60,7 @@ class LastFmService:
                 result = urllib2.urlopen(url)
             except Exception, e:
                 logger.warning("Failed to load " + artist_name + ": " + str(e))
-                loading_failures.append(artist_name + ": " + str(e))
+                self.loading_failures.append(artist_name + ": " + str(e))
                 return []
 
             similar_feed = result.read()
@@ -82,6 +82,9 @@ class LastFmService:
                 break
 
             artist = line_split[2]
+            for i in range(3, len(line_split)):
+                artist += "," + line_split[i]
+
             artist = artist.replace('&amp;', '&')
             artist = artist.replace('&quot;', '\'')
             similar.append(artist)
