@@ -4,5 +4,5 @@ Run like so:
 
 python music_tour.py 'The Beatles' 'The Hey Chinaskis'
 
-It might take a while. It might write some local cache files. Don't panic! It'll be ok.
+It might take a while. Requires pymongo and a mongodb instance (assumed to be at localhost on local port but can be overridden via mongo_config.py)
 
