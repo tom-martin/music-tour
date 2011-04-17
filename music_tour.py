@@ -3,134 +3,135 @@ from spotify import SpotifyMetaService
 import random
 from mongo_cache import MongoCache
 import logging
-import mongo_config
-from datetime import timedelta, datetime
+from datetime import timedelta
 from simple_mongo_service_lock import SimpleMongoServiceLock
 
 
 logger = logging.getLogger(__name__)
 
-# TODO make members of a class?
-last_lock = SimpleMongoServiceLock('localhost', 27017, 'music_tour', 'last_lock', 1, 30)
-last_fm = LastFmService(MongoCache(mongo_config.mongo_host, 27017, 'music_tour', 'last_cache', timedelta(weeks=24)), last_lock)
-spotify_lock = SimpleMongoServiceLock('localhost', 27017, 'music_tour', 'spotify_lock', 1, 30)
-spotify = SpotifyMetaService(MongoCache(mongo_config.mongo_host, 27017, 'music_tour', 'spotify_cache',timedelta(weeks=24)), spotify_lock)
+class MusicTourService:
+    def __init__(self, mongo_host, mongo_port):
 
-def find_path(artist_one, artist_two, blacklist):
-    logger.debug("Black list" + str(blacklist))
+        last_lock = SimpleMongoServiceLock(mongo_host, mongo_port, 'music_tour', 'last_lock', 1, 30)
+        self.last_fm = LastFmService(MongoCache(mongo_host, mongo_port, 'music_tour', 'last_cache', timedelta(weeks=24)), last_lock)
+        spotify_lock = SimpleMongoServiceLock(mongo_host, mongo_port, 'music_tour', 'spotify_lock', 1, 30)
+        self.spotify = SpotifyMetaService(MongoCache(mongo_host, mongo_port, 'music_tour', 'spotify_cache',timedelta(weeks=24)), spotify_lock)
 
-    artist_one_out = set()
-    artist_one_out.add(artist_one)
-    artist_one_parent = {artist_one: None}
+    def find_path(self, artist_one, artist_two, blacklist):
+        logger.debug("Black list" + str(blacklist))
 
-    artist_two_out = set()
-    artist_two_out.add(artist_two)
-    artist_two_parent = {artist_two: None}
+        artist_one_out = set()
+        artist_one_out.add(artist_one)
+        artist_one_parent = {artist_one: None}
 
-    step_count = 0
+        artist_two_out = set()
+        artist_two_out.add(artist_two)
+        artist_two_parent = {artist_two: None}
 
-    linking_artist = None
+        step_count = 0
 
-    queue_one = [artist_one]
-    queue_two = [artist_two]
-    while len(queue_one) > 0 and len(queue_two) > 0 and linking_artist == None:
-        step_count+=1
-        parent = queue_one[0]
-        queue_one.remove(parent)
+        linking_artist = None
 
-        artists = last_fm.get_similar_for_artist(parent)
-        for artist in artists:
-            if not artist in artist_one_out:
-                artist_one_out.add(artist)
-                if not artist in blacklist:
-                    queue_one.append(artist)
-                    artist_one_parent[artist] = parent
+        queue_one = [artist_one]
+        queue_two = [artist_two]
+        while len(queue_one) > 0 and len(queue_two) > 0 and linking_artist == None:
+            step_count+=1
+            parent = queue_one[0]
+            queue_one.remove(parent)
 
-                    if artist in artist_two_out:
-                        linking_artist = artist
-                        break;
+            artists = self.last_fm.get_similar_for_artist(parent)
+            for artist in artists:
+                if not artist in artist_one_out:
+                    artist_one_out.add(artist)
+                    if not artist in blacklist:
+                        queue_one.append(artist)
+                        artist_one_parent[artist] = parent
 
+                        if artist in artist_two_out:
+                            linking_artist = artist
+                            break;
+
+            if linking_artist != None:
+                break
+
+            parent = queue_two[0]
+            queue_two.remove(parent)
+
+            artists = self.last_fm.get_similar_for_artist(parent)
+            for artist in artists:
+                if not artist in artist_two_out:
+                    artist_two_out.add(artist)
+                    if not artist in blacklist:
+                        queue_two.append(artist)
+                        artist_two_parent[artist] = parent
+
+                        if artist in artist_one_out:
+                            linking_artist = artist
+                            break;
+
+            if linking_artist != None:
+                break
+
+        route = []
         if linking_artist != None:
-            break
 
-        parent = queue_two[0]
-        queue_two.remove(parent)
+            current = linking_artist
+            while current != None:
+                route.insert(0, current)
+                current = artist_one_parent[current]
 
-        artists = last_fm.get_similar_for_artist(parent)
-        for artist in artists:
-            if not artist in artist_two_out:
-                artist_two_out.add(artist)
-                if not artist in blacklist:
-                    queue_two.append(artist)
-                    artist_two_parent[artist] = parent
+            current = artist_two_parent[linking_artist]
+            while current != None:
+                route.append(current)
+                current = artist_two_parent[current]
 
-                    if artist in artist_one_out:
-                        linking_artist = artist
-                        break;
+            logger.debug(linking_artist + " is in both graphs (" + str(step_count) + ")")
 
-        if linking_artist != None:
-            break
+        return route
 
-    route = []
-    if linking_artist != None:
+    def find_spotify_path(self, artist_one, artist_two, blacklist):
+        if len(self.spotify.get_tracks(artist_one)) == 0:
+            raise Exception("No spotify tracks found for " + artist_one)
 
-        current = linking_artist
-        while current != None:
-            route.insert(0, current)
-            current = artist_one_parent[current]
+        if len(self.spotify.get_tracks(artist_two)) == 0:
+            raise Exception("No spotify tracks found for " + artist_two)
 
-        current = artist_two_parent[linking_artist]
-        while current != None:
-            route.append(current)
-            current = artist_two_parent[current]
+        # Copy the blacklist so the param needn't be a set
+        blacklist = set(blacklist)
 
-        logger.debug(linking_artist + " is in both graphs (" + str(step_count) + ")")
+        route = []
+        retry = 0    
+        while len(route) == 0 and retry < 100:
+            retry += 1
+            route = self.find_path(artist_one, artist_two, blacklist)
+            logger.debug("Cache hit percentage " + str(self.last_fm.get_cache_percentage()))
 
-    return route
+            if len(self.last_fm.loading_failures) > 0:
+                logger.warning(self.last_fm.loading_failures)
 
-def find_spotify_path(artist_one, artist_two, blacklist):
-    if len(spotify.get_tracks(artist_one)) == 0:
-        raise Exception("No spotify tracks found for " + artist_one)
 
-    if len(spotify.get_tracks(artist_two)) == 0:
-        raise Exception("No spotify tracks found for " + artist_two)
+            if len(route) == 0:
+                # TODO exception class
+                raise Exception("No path found")
 
-    # Copy the blacklist so the param needn't be a set
-    blacklist = set(blacklist)
-
-    route = []
-    retry = 0    
-    while len(route) == 0 and retry < 100:
-        retry += 1
-        route = find_path(artist_one, artist_two, blacklist)
-        logger.debug("Cache hit percentage " + str(last_fm.get_cache_percentage()))
-
-        if len(last_fm.loading_failures) > 0:
-            logger.warning(last_fm.loading_failures)
-
+            for artist in route:
+                artist_tracks = self.spotify.get_tracks(artist)
+                if len(artist_tracks) == 0:
+                    route = []
+                    logger.debug("Blacklisting " + artist + " (no spotify tracks found) and starting over")
+                    tracks = []
+                    blacklist.add(artist)
+                    break
 
         if len(route) == 0:
             # TODO exception class
             raise Exception("No path found")
+        return route
 
+    def get_random_tracks_for_route(self, route):
+        tracks = []
         for artist in route:
-            artist_tracks = spotify.get_tracks(artist)
-            if len(artist_tracks) == 0:
-                route = []
-                logger.debug("Blacklisting " + artist + " (no spotify tracks found) and starting over")
-                tracks = []
-                blacklist.add(artist)
-                break
+            tracks.append(random.choice(self.spotify.get_tracks(artist)))
 
-    if len(route) == 0:
-        # TODO exception class
-        raise Exception("No path found")
-    return route
-
-def get_random_tracks_for_route(route):
-    tracks = []
-    for artist in route:
-        tracks.append(random.choice(spotify.get_tracks(artist)))
-
-    return tracks
+        return tracks
 
