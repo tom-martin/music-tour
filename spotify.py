@@ -1,66 +1,54 @@
 import urllib2
 import urllib
-from time import time, sleep
 import logging
-import os
 import xml.etree.ElementTree as etree
 
-logger = logging.getLogger('spotify')
+logger = logging.getLogger(__name__)
 
 class SpotifyMetaService:
-    def __init__(self):
-        self.last_request_time = time()
-        self.CACHE_PATH = './spotify_cache'
+    def __init__(self, cache, service_lock):
         self.REQUIRED_TERRITORY = "GB"
         self.MAX_TRACKS = 5
-        
-
-        try:
-            os.makedirs(self.CACHE_PATH)
-        except OSError, e:
-            if not os.path.exists(self.CACHE_PATH):
-                raise e
+        self.lock = service_lock
+        self.cache = cache
 
 
-    def get_from_cache(self, cache_key):
-        try:
-            sim_file = open(self.CACHE_PATH + '/' + cache_key + '.txt')
-            similar_feed = sim_file.read()
-            logger.debug("Found from cache " + cache_key)
-            return similar_feed
-        except IOError, e:
-            return None
+    def get_from_cache(self, artist_name):
+        cached = self.cache.get(artist_name)
+        if cached is not None:
+            return cached['tracks']
 
-    def write_to_cache(self, cache_key, cache_value):
-        sim_file = open(self.CACHE_PATH + '/' + cache_key + '.txt', 'w')
-        sim_file.write(cache_value)
+        return None
+
+    def write_to_cache(self, artist_name, tracks):
+        to_cache = {'artist_name': artist_name,
+                    'tracks': tracks}
+
+        self.cache.put(artist_name, to_cache)
     
-    def get_tracks(self, artist_name, ):
+    def get_tracks(self, artist_name):
 
-        artist_name_esc = urllib.quote(artist_name)
-        tracks_string = self.get_from_cache(artist_name_esc)
+        artist_name_esc = urllib.quote(artist_name.encode('utf-8'))
+        tracks_cached = self.get_from_cache(artist_name)
 
-        if tracks_string == None:
-
-            time_diff = time() - self.last_request_time
-            while time_diff < 1:
-                logger.info("Waiting for " + str(1 - time_diff))
-                sleep(1 - time_diff)
-                time_diff = time() - self.last_request_time
+        if tracks_cached != None:
+            return tracks_cached
+        else:
 
             url = 'http://ws.spotify.com/search/1/track?q=' + artist_name_esc
             try:
-                print "Loading " + url
+                self.lock.acquire()
+                logger.debug("Loading " + url)
                 result = urllib2.urlopen(url)
                 tracks_string = result.read()
-                self.last_request_time = time()
-                self.write_to_cache(artist_name_esc, tracks_string)
 
             except Exception, e:
                 logger.warning("Failed to load " + artist_name + ": " + str(e))
                 # TODO
                 #self.loading_failures.append(artist_name + ": " + str(e))
                 return []
+            finally:
+                self.lock.release()
 
         tracks = etree.fromstring(tracks_string)
         # Fucking namespaces!
@@ -74,6 +62,8 @@ class SpotifyMetaService:
         
             if len(matching_tracks) >= self.MAX_TRACKS:
                 break
+
+        self.write_to_cache(artist_name, matching_tracks)
 
         return matching_tracks
 

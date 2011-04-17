@@ -1,76 +1,62 @@
 import urllib2
 import urllib
-from time import time, sleep
 import logging
-import os
 
-logger = logging.getLogger('last_fm')
+logger = logging.getLogger(__name__)
 
 class LastFmService:
-    def __init__(self):
-        self.last_request_time = time()
+    def __init__(self, cache, service_lock):
         self.loading_failures = []
         self.cache_count = 0
         self.last_count = 0
-
-        self.CACHE_PATH = './last_cache'
-
-        try:
-            os.makedirs(self.CACHE_PATH)
-        except OSError, e:
-            if not os.path.exists(self.CACHE_PATH):
-                raise e
+        self.lock = service_lock
+        self.cache = cache
 
 
     def get_from_cache(self, artist_name):
-        try:
-            sim_file = open(self.CACHE_PATH + '/' + artist_name + '.txt')
-            similar_feed = sim_file.read()
-            logger.debug("Found from cache")
-            return similar_feed
-        except IOError, e:
-            return None
+        cached = self.cache.get(artist_name)
+        if cached != None:
+            return cached['similar_artists']
 
-    def write_to_cache(self, artist_name, feed):
-        sim_file = open(self.CACHE_PATH + '/' + artist_name + '.txt', 'w')
-        sim_file.write(feed)
+        return None
+
+    def write_to_cache(self, artist_name, similar_artists):
+        cached_artist = {   "artist_name": artist_name,
+                            "similar_artists": similar_artists}
+
+        self.cache.put(artist_name, cached_artist)
 
     def escape_artist_name(self, artist_name):
         # quote_plus THEN quote, seems to be the only thing that works, also manually replace
         # . with %2E before the last quote
-        return urllib.quote(urllib.quote_plus(artist_name).replace('.', '%2E'))
+        return urllib.quote(urllib.quote_plus(artist_name.encode('utf-8')).replace('.', '%2E'))
 
     def get_similar_for_artist(self, artist_name):
-
         artist_name_esc = self.escape_artist_name(artist_name)
 
         logger.debug("Searching for " + artist_name)
 
-        similar_feed = self.get_from_cache(artist_name_esc)
+        cached = self.get_from_cache(artist_name)
 
-        if similar_feed == None:
-            time_diff = time() - self.last_request_time
-            while time_diff < 1:
-                logger.info("Waiting for " + str(1 - time_diff))
-                sleep(1 - time_diff)
-                time_diff = time() - self.last_request_time
-
-            url = 'http://ws.audioscrobbler.com/2.0/artist/' + artist_name_esc + '/similar.txt'
-            try:
-                result = urllib2.urlopen(url)
-            except Exception, e:
-                logger.warning("Failed to load " + artist_name + ": " + str(e))
-                self.loading_failures.append(artist_name + ": " + str(e))
-                return []
-
-            similar_feed = result.read()
-            self.last_request_time = time()
-
-            self.write_to_cache(artist_name_esc, similar_feed)
-            self.last_count += 1
-            logger.debug("Got from last.fm")
-        else:
+        if cached != None:
             self.cache_count += 1
+            return cached
+
+        try:
+            self.lock.acquire()
+            url = 'http://ws.audioscrobbler.com/2.0/artist/' + artist_name_esc + '/similar.txt'
+            result = urllib2.urlopen(url)
+        except Exception, e:
+            logger.warning("Failed to load " + artist_name + ": " + str(e))
+            self.loading_failures.append(artist_name + ": " + str(e))
+            return []
+        finally:
+            self.lock.release()
+
+        similar_feed = result.read()
+
+        self.last_count += 1
+        logger.debug("Got from last.fm")
     
     
         similar = []
@@ -87,9 +73,9 @@ class LastFmService:
 
             artist = artist.replace('&amp;', '&')
             artist = artist.replace('&quot;', '\'')
-            similar.append(artist)
+            similar.append(artist.decode('utf-8'))
 
-        
+        self.write_to_cache(artist_name, similar)
     
         return similar
 

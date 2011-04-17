@@ -1,12 +1,23 @@
-import sys
 from last_fm import LastFmService
 from spotify import SpotifyMetaService
 import random
-
+from mongo_cache import MongoCache
 import logging
+import mongo_config
+from datetime import timedelta, datetime
+from simple_mongo_service_lock import SimpleMongoServiceLock
+
+
+logger = logging.getLogger(__name__)
+
+# TODO make members of a class?
+last_lock = SimpleMongoServiceLock('localhost', 27017, 'music_tour', 'last_lock', 1, 30)
+last_fm = LastFmService(MongoCache(mongo_config.mongo_host, 27017, 'music_tour', 'last_cache', timedelta(weeks=24)), last_lock)
+spotify_lock = SimpleMongoServiceLock('localhost', 27017, 'music_tour', 'spotify_lock', 1, 30)
+spotify = SpotifyMetaService(MongoCache(mongo_config.mongo_host, 27017, 'music_tour', 'spotify_cache',timedelta(weeks=24)), spotify_lock)
 
 def find_path(artist_one, artist_two, blacklist):
-    print blacklist
+    logger.debug("Black list" + str(blacklist))
 
     artist_one_out = set()
     artist_one_out.add(artist_one)
@@ -60,9 +71,9 @@ def find_path(artist_one, artist_two, blacklist):
         if linking_artist != None:
             break
 
-
+    route = []
     if linking_artist != None:
-        route = []
+
         current = linking_artist
         while current != None:
             route.insert(0, current)
@@ -73,66 +84,53 @@ def find_path(artist_one, artist_two, blacklist):
             route.append(current)
             current = artist_two_parent[current]
 
-        print linking_artist + " is in both graphs (" + str(step_count) + ")"
+        logger.debug(linking_artist + " is in both graphs (" + str(step_count) + ")")
 
     return route
 
-if len(sys.argv) < 3:
-    print "Usage find.py <artist name> <other artist name>"
-    exit()
+def find_spotify_path(artist_one, artist_two, blacklist):
+    if len(spotify.get_tracks(artist_one)) == 0:
+        raise Exception("No spotify tracks found for " + artist_one)
 
-logging.basicConfig(level=logging.DEBUG)
+    if len(spotify.get_tracks(artist_two)) == 0:
+        raise Exception("No spotify tracks found for " + artist_two)
 
-logger = logging.getLogger('music_tour')
+    # Copy the blacklist so the param needn't be a set
+    blacklist = set(blacklist)
 
-last_fm = LastFmService()
-spotify = SpotifyMetaService()
+    route = []
+    retry = 0    
+    while len(route) == 0 and retry < 100:
+        retry += 1
+        route = find_path(artist_one, artist_two, blacklist)
+        logger.debug("Cache hit percentage " + str(last_fm.get_cache_percentage()))
 
-artist_one = sys.argv[1]
-artist_two = sys.argv[2]
+        if len(last_fm.loading_failures) > 0:
+            logger.warning(last_fm.loading_failures)
 
-if len(spotify.get_tracks(artist_one)) == 0:
-    print "No spotify tracks found for " + artist_one
-    exit()
 
-if len(spotify.get_tracks(artist_two)) == 0:
-    print "No spotify tracks found for " + artist_two
-    exit()
+        if len(route) == 0:
+            # TODO exception class
+            raise Exception("No path found")
 
-blacklist = set()
-if len(sys.argv) > 3:
-    for blacklisted in sys.argv[3].split(','):
-        blacklist.add(blacklisted)
-
-logger.debug("Searching for " + artist_one + " to " + artist_two)
-
-route = []
-tracks = []
-while len(tracks) == 0:
-    route = find_path(artist_one, artist_two, blacklist)
-    print "Cache hit percentage " + str(last_fm.get_cache_percentage())
-    if len(last_fm.loading_failures) > 0:
-        logger.warning(last_fm.loading_failures)
-
+        for artist in route:
+            artist_tracks = spotify.get_tracks(artist)
+            if len(artist_tracks) == 0:
+                route = []
+                logger.debug("Blacklisting " + artist + " (no spotify tracks found) and starting over")
+                tracks = []
+                blacklist.add(artist)
+                break
 
     if len(route) == 0:
-        print "Fail"
-        break
+        # TODO exception class
+        raise Exception("No path found")
+    return route
 
+def get_random_tracks_for_route(route):
+    tracks = []
     for artist in route:
-        artist_tracks = spotify.get_tracks(artist)
-        if len(artist_tracks) > 0:
-            tracks.append(random.choice(artist_tracks))
-        else:
-            # start again
-            print "Blacklisting " + artist + " (no spotify tracks found) and starting over"
-            tracks = []
-            blacklist.add(artist)
-            break
+        tracks.append(random.choice(spotify.get_tracks(artist)))
 
-if len(tracks) > 0:
-    print route
-    print
-    print "Playlist:"
-    for track in tracks:
-        print track    
+    return tracks
+
